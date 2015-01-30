@@ -55,6 +55,11 @@ func (c *ComposedDecider) Decide(ctx *FSMContext, h HistoryEvent, data interface
 	}
 }
 
+func logf(ctx *FSMContext, format string, data ...interface{}) {
+	format = fmt.Sprintf("fsm=%s state=%s ", ctx.Name, ctx.State) + format
+	log.Printf(format, data)
+}
+
 //DefaultDecider is a 'catch-all' decider that simply logs the unhandled decision.
 //You should place this or one like it as the last decider in your top level ComposableDecider.
 func DefaultDecider() Decider {
@@ -265,5 +270,148 @@ func ManagedContinuations(historySize int, timerRetrySeconds int) Decider {
 		handleContinuationSignal,
 		signalContinuationWhenHistoryLarge,
 	)
+}
 
+func OnStarted(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		switch h.EventType {
+		case EventTypeWorkflowExecutionStarted:
+			logf(ctx, "at=on-started")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return Pass
+	}
+}
+
+func OnChildStarted(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		switch h.EventType {
+		case EventTypeChildWorkflowExecutionStarted:
+			logf(ctx, "at=on-child-started")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return Pass
+	}
+}
+
+func OnData(predicate PredicateFunc, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		if predicate(data) {
+			logf(ctx, "at=on-data")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return Pass
+	}
+}
+
+func OnSignalReceived(signalName string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		switch h.EventType {
+		case EventTypeWorkflowExecutionSignaled:
+			if h.WorkflowExecutionSignaledEventAttributes.SignalName == signalName {
+				logf(ctx, "at=on-signal-received")
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+		}
+		return Pass
+	}
+}
+
+func OnSignalSent(signalName string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		switch h.EventType {
+		case EventTypeExternalWorkflowExecutionSignaled:
+			// TODO: actually check the signal name (this turns out to be hard ... lolswf)
+			logf(ctx, "at=on-signal-sent")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return Pass
+	}
+}
+
+func OnSignalFailed(signalName string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		switch h.EventType {
+		case EventTypeSignalExternalWorkflowExecutionFailed:
+			// TODO: actually check the signal name (this turns out to be hard ... lolswf)
+			logf(ctx, "at=on-signal-failed")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return Pass
+	}
+}
+
+func OnActivityCompleted(activityName string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		switch h.EventType {
+		case EventTypeActivityTaskCompleted:
+			if ctx.ActivityInfo(h).Name == activityName {
+				logf(ctx, "at=on-activity-completed")
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+		}
+		return Pass
+	}
+}
+
+func OnActivityFailed(activityName string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		switch h.EventType {
+		case EventTypeActivityTaskFailed, EventTypeActivityTaskTimedOut, EventTypeActivityTaskCanceled:
+			if ctx.ActivityInfo(h).Name == activityName {
+				logf(ctx, "at=on-activity-failed")
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+		}
+		return Pass
+	}
+}
+
+func AddDecision(decisionFn DecisionFunc) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		decisions := ctx.EmptyDecisions()
+		d := decisionFn(ctx, h, data)
+		logf(ctx, "at=decide")
+		decisions = append(decisions, d)
+		return ctx.ContinueDecision(data, decisions)
+	}
+}
+
+func AddDecisions(signalFn MultiDecisionFunc) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		decisions := ctx.EmptyDecisions()
+		ds := signalFn(ctx, h, data)
+		logf(ctx, "at=decide-many")
+		decisions = append(decisions, ds...)
+		return ctx.ContinueDecision(data, decisions)
+	}
+}
+
+func UpdateState(updateFunc StateFunc) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		logf(ctx, "at=update-state")
+		updateFunc(ctx, h, data)
+		return ctx.ContinueDecision(data, ctx.EmptyDecisions())
+	}
+}
+
+func Transition(toState string) Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		logf(ctx, "at=transition")
+		return ctx.Goto(toState, data, ctx.EmptyDecisions())
+	}
+}
+
+func Complete() Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		log.Printf("at=complete-workflow workflowID=%s", ctx.WorkflowID)
+		return ctx.Complete(data)
+	}
+}
+
+func Stay() Decider {
+	return func(ctx *FSMContext, h HistoryEvent, data interface{}) Outcome {
+		logf(ctx, "at=stay")
+		return ctx.Stay(data, ctx.EmptyDecisions())
+	}
 }
